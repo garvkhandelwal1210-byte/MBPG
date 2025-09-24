@@ -1,36 +1,44 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const apiKey = process.env.GEMINI_API_KEY;
-
 const SYSTEM_PROMPT = `
 You convert a user's natural-language mood/vibe prompt into a structured JSON with music attributes.
 Return ONLY JSON with keys: mood_tags (string[]), energy (0-1), danceability (0-1), valence (0-1), tempo_range (string, one of: slow, medium, fast), genres (string[]).
 `;
 
 export async function interpretMoodPrompt(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('Missing GEMINI_API_KEY');
   }
-
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
   const input = `${SYSTEM_PROMPT}\nPrompt: ${prompt}`;
 
-  const response = await model.generateContent(input);
-  const text = response?.response?.text?.() || '';
-
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Fallback: try to extract JSON block
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('Gemini output not JSON');
-    parsed = JSON.parse(match[0]);
+  const modelsToTry = ['gemini-1.5-flash', 'gemini-1.5-flash-8b'];
+  let lastError;
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelName = modelsToTry[i];
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const response = await model.generateContent(input);
+      const text = response?.response?.text?.() || '';
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // Fallback: try to extract JSON block
+        const match = text.match(/\{[\s\S]*\}/);
+        if (!match) throw new Error(`Gemini output not JSON: ${text.slice(0, 200)}...`);
+        parsed = JSON.parse(match[0]);
+      }
+      return normalizeAttributes(parsed);
+    } catch (err) {
+      lastError = err;
+      await new Promise(r => setTimeout(r, 400 + i * 400));
+    }
   }
-
-  return normalizeAttributes(parsed);
+  const msg = lastError?.response?.data || lastError?.message || lastError;
+  throw new Error(`Gemini request error: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
 }
 
 function normalizeAttributes(raw) {
